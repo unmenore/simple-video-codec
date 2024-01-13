@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/flate"
 	"flag"
 	"io"
 	"log"
@@ -98,8 +99,7 @@ func main() {
 	//Теперь имеется видео в yuv кодировке с половиной занимаемого пространства
 
 	yuvSize := size(frames)
-	log.Printf("YUV420P size: %d bytes (%0.2f%% original size)", yuvSize, 100*float32(yuvSize)/float32(rawSize))\
-
+	log.Printf("YUV420P size: %d bytes (%0.2f%% original size)", yuvSize, 100*float32(yuvSize)/float32(rawSize))
 
 	//Также можем записать это в файл который можно воспроизвести с помощью ffplay
 	//ffplay -f rawvideo -pixel_format yuv420p -video_size 640x480 -framerate 25 encoded.yuv
@@ -108,9 +108,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-
 	encoded := make([][]byte, len(frames))
-
 
 	//Упростив данные вычисли разницу между каждым кадром
 	//Во многих случаях пиксели между кадрами меняются незначительно. Следовательно многие длеьты будут небольшими
@@ -121,15 +119,15 @@ func main() {
 	//В данном энкодере делаем нулевой кадр ключевым
 	//Остальные кадры буудт отличатся от предыдущего кадра - они называются прогнозируемыми кадрами, P-кадры
 	for i := range frames {
-		
+
 		if i == 0 {
 			encoded[i] = frames[i]
 			continue
 		}
 
 		delta := make([]byte, len(frames[i]))
-		
-		for j:=0; j < len(delta); i++ {
+
+		for j := 0; j < len(delta); j++ {
 			delta[j] = frames[i][j] - frames[i-1][j]
 		}
 
@@ -138,13 +136,169 @@ func main() {
 		//Это алгоритм в котором сохраняется количество повторений значения, а затем само значение
 		//В совеременных кодеках этой шляпы нет, но для цели сжатия подойдет
 
-		
+		var rle []byte
 
+		for j := 0; j < len(delta); {
+			//Подсчет, сколько раз повторяется текущее значение
+			var count byte
+			for count = 0; count < 255 && j+int(count) < len(delta) && delta[j+int(count)] == delta[j]; count++ {
+
+				//Записываем счетчик и значение
+				rle = append(rle, count)
+				rle = append(rle, delta[j])
+
+				j += int(count)
+			}
+
+			//Запись RLE кадра
+
+			encoded[i] = rle
+		}
+		// Это хорошо, у нас 1/4 размера исходного видео. Но мы можем добиться большего.
+		// Обратите внимание, что большинство наших самых длинных серий - это серии с нулями. Это потому, что разница
+		// между кадрами обычно невелика. У нас есть некоторая гибкость в выборе алгоритма
+		// здесь, поэтому, чтобы упростить кодировщик, мы остановимся на использовании алгоритма DEFLATE
+		//, который доступен в стандартной библиотеке. Реализация выходит за рамки
+		// этой демонстрации.
+
+		var deflated bytes.Buffer
+
+		w, err := flate.NewWriter(&deflated, flate.BestCompression)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for i := range frames {
+			if i == 0 {
+
+				if _, err := w.Write(frames[i]); err != nil {
+					log.Fatal(err)
+				}
+				continue
+			}
+
+			delta := make([]byte, len(frames[i]))
+			for j := 0; j < len(delta); j++ {
+				delta[j] = frames[i][j] - frames[i-1][j]
+			}
+
+			if _, err := w.Write(delta); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		log.Fatal(err)
 	}
 
+	deflatedSize := deflated.Len()
+	log.Printf("DEFLATE size: %d bytes (%0.2f%% original size)", deflatedSize, 100*float32(deflatedSize)/float32(rawSize))
 
+	// Вы заметите, что выполнение шага DEFLATE занимает довольно много времени. В целом, кодировщики, как правило, работают
+	// намного медленнее, чем декодеры. Это верно для большинства алгоритмов сжатия, а не только для видеокодеков.
+	// Это связано с тем, что кодировщику необходимо проделать большую работу для анализа данных и принятия решений
+	// о том, как их сжать. Декодер, с другой стороны, представляет собой простой цикл, который считывает
+	// данные и выполняет действия, противоположные кодировщику.
+	//
+	// На данный момент мы достигли 90%-ной степени сжатия!
+	//
+	// Кстати, вы, возможно, думаете, что типичное сжатие JPEG составляет 90%, так почему бы не закодировать в JPEG
+	// каждый кадр? Хотя это правда, алгоритм, который мы предоставили выше, немного проще, чем JPEG.
+	// Мы демонстрируем, что использование преимуществ временной локальности может привести к таким же
+	// высоким коэффициентам сжатия, как у JPEG, но с гораздо более простым алгоритмом.
+	//
+	// Кроме того, алгоритм DEFLATE не использует преимущества двумерности данных
+	// и поэтому не так эффективен, как мог бы быть. В реальном мире видеокодеки гораздо более
+	// сложнее, чем тот, который мы реализовали здесь. Они используют преимущества двумерности
+	// данных, они используют более сложные алгоритмы и оптимизированы для аппаратного обеспечения, на котором они
+	// работают. Например, кодек H.264 аппаратно реализован на многих современных графических процессорах.
+	//
+	// Теперь у нас есть наше закодированное видео. Давайте расшифруем его и посмотрим, что у нас получится.
 
+	// Сначала мы расшифруем поток DEFLATE.
+	var inflated bytes.Buffer
 
+	r := flate.NewReader(&deflated)
+	if _, err := io.Copy(&inflated, r); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := r.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	//Разделение потока на кадры
+	decodedFrames := make([][]byte, 0)
+	for {
+		frame := make([]byte, width*height*3/2)
+		if _, err := io.ReadFull(&inflated, frame); err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Fatal(err)
+		}
+		decodedFrames = append(decodedFrames, frame)
+	}
+	// Для каждого кадра, кроме первого, нам нужно добавить предыдущий кадр к дельта-кадру.
+	// Это противоположно тому, что мы делали в кодировщике.
+
+	for i := range decodedFrames {
+		if i == 0 {
+			continue
+		}
+
+		for j := 0; j < len(decodedFrames[i]); j++ {
+			decodedFrames[i][j] += decodedFrames[i-1][j]
+		}
+	}
+
+	if err := os.WriteFile("decoded.yuv", bytes.Join(decodedFrames, nil), 0644); err != nil {
+		log.Fatal(err)
+	}
+	// Затем преобразуйте каждый кадр YUV в RGB.
+
+	for i, frame := range decodedFrames {
+		Y := frame[:width*height]
+		U := frame[width*height : width*height+(width*height)/4]
+		V := frame[width*height+(width*height)/4:]
+
+		rgb := make([]byte, 0, width*height*3)
+
+		for j := 0; j < height; j++ {
+			for k := 0; k < width; k++ {
+				y := float64(Y[j*width+k])
+				u := float64(U[(j/2)*(width/2)+(k/2)]) - 128
+				v := float64(V[(j/2)*(width/2)+(k/2)]) - 128
+
+				r := clamp(y+1.402*v, 0, 255)
+				g := clamp(y-0.344*u-0.714*v, 0, 255)
+				b := clamp(y+1.772*u, 0, 255)
+
+				rgb = append(rgb, uint8(r), uint8(g), uint8(b))
+			}
+		}
+		decodedFrames[i] = rgb
+	}
+
+	// Наконец, запишите декодированное видео в файл.
+	//
+	// Это видео можно воспроизвести с помощью ffplay:
+	//
+	// ffplay -f rawvideo -формат пикселя rgb24 -размер видео 384x216 -частота кадров 25 декодировано.rgb24
+	//
+	out, err := os.Create("decoded.rgb24")
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer out.Close()
+
+	for i := range decodedFrames {
+		if _, err := out.Write(decodedFrames[i]); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 
 func size(frames [][]byte) int {
