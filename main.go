@@ -104,7 +104,7 @@ func main() {
 	//Также можем записать это в файл который можно воспроизвести с помощью ffplay
 	//ffplay -f rawvideo -pixel_format yuv420p -video_size 640x480 -framerate 25 encoded.yuv
 
-	if err := os.WriteFile("encode.yuv", bytes.Join(frames, nil), 0644); err != nil {
+	if err := os.WriteFile("encoded.yuv", bytes.Join(frames, nil), 0644); err != nil {
 		log.Fatal(err)
 	}
 
@@ -137,54 +137,52 @@ func main() {
 		//В совеременных кодеках этой шляпы нет, но для цели сжатия подойдет
 
 		var rle []byte
-
 		for j := 0; j < len(delta); {
-			//Подсчет, сколько раз повторяется текущее значение
+			// Count the number of times the current value repeats.
 			var count byte
 			for count = 0; count < 255 && j+int(count) < len(delta) && delta[j+int(count)] == delta[j]; count++ {
-
-				//Записываем счетчик и значение
-				rle = append(rle, count)
-				rle = append(rle, delta[j])
-
-				j += int(count)
 			}
 
-			//Запись RLE кадра
+			// Store the count and value.
+			rle = append(rle, count)
+			rle = append(rle, delta[j])
 
-			encoded[i] = rle
-		}
-		// Это хорошо, у нас 1/4 размера исходного видео. Но мы можем добиться большего.
-		// Обратите внимание, что большинство наших самых длинных серий - это серии с нулями. Это потому, что разница
-		// между кадрами обычно невелика. У нас есть некоторая гибкость в выборе алгоритма
-		// здесь, поэтому, чтобы упростить кодировщик, мы остановимся на использовании алгоритма DEFLATE
-		//, который доступен в стандартной библиотеке. Реализация выходит за рамки
-		// этой демонстрации.
-
-		var deflated bytes.Buffer
-
-		w, err := flate.NewWriter(&deflated, flate.BestCompression)
-		if err != nil {
-			log.Fatal(err)
+			j += int(count)
 		}
 
-		for i := range frames {
-			if i == 0 {
+		// Save the RLE frame.
+		encoded[i] = rle
+	}
+	// Это хорошо, у нас 1/4 размера исходного видео. Но мы можем добиться большего.
+	// Обратите внимание, что большинство наших самых длинных серий - это серии с нулями. Это потому, что разница
+	// между кадрами обычно невелика. У нас есть некоторая гибкость в выборе алгоритма
+	// здесь, поэтому, чтобы упростить кодировщик, мы остановимся на использовании алгоритма DEFLATE
+	//, который доступен в стандартной библиотеке. Реализация выходит за рамки
+	// этой демонстрации.
 
-				if _, err := w.Write(frames[i]); err != nil {
-					log.Fatal(err)
-				}
-				continue
-			}
+	rleSize := size(encoded)
+	log.Printf("RLE size: %d bytes (%0.2f%% original size)", rleSize, 100*float32(rleSize)/float32(rawSize))
 
-			delta := make([]byte, len(frames[i]))
-			for j := 0; j < len(delta); j++ {
-				delta[j] = frames[i][j] - frames[i-1][j]
-			}
-
-			if _, err := w.Write(delta); err != nil {
+	var deflated bytes.Buffer
+	w, err := flate.NewWriter(&deflated, flate.BestCompression)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i := range frames {
+		if i == 0 {
+			// This is the keyframe, write the raw frame.
+			if _, err := w.Write(frames[i]); err != nil {
 				log.Fatal(err)
 			}
+			continue
+		}
+
+		delta := make([]byte, len(frames[i]))
+		for j := 0; j < len(delta); j++ {
+			delta[j] = frames[i][j] - frames[i-1][j]
+		}
+		if _, err := w.Write(delta); err != nil {
+			log.Fatal(err)
 		}
 	}
 	if err := w.Close(); err != nil {
@@ -217,12 +215,10 @@ func main() {
 
 	// Сначала мы расшифруем поток DEFLATE.
 	var inflated bytes.Buffer
-
 	r := flate.NewReader(&deflated)
 	if _, err := io.Copy(&inflated, r); err != nil {
 		log.Fatal(err)
 	}
-
 	if err := r.Close(); err != nil {
 		log.Fatal(err)
 	}
@@ -255,15 +251,15 @@ func main() {
 	if err := os.WriteFile("decoded.yuv", bytes.Join(decodedFrames, nil), 0644); err != nil {
 		log.Fatal(err)
 	}
+
 	// Затем преобразуйте каждый кадр YUV в RGB.
 
 	for i, frame := range decodedFrames {
 		Y := frame[:width*height]
-		U := frame[width*height : width*height+(width*height)/4]
-		V := frame[width*height+(width*height)/4:]
+		U := frame[width*height : width*height+width*height/4]
+		V := frame[width*height+width*height/4:]
 
 		rgb := make([]byte, 0, width*height*3)
-
 		for j := 0; j < height; j++ {
 			for k := 0; k < width; k++ {
 				y := float64(Y[j*width+k])
@@ -287,11 +283,9 @@ func main() {
 	// ffplay -f rawvideo -формат пикселя rgb24 -размер видео 384x216 -частота кадров 25 декодировано.rgb24
 	//
 	out, err := os.Create("decoded.rgb24")
-
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer out.Close()
 
 	for i := range decodedFrames {
@@ -307,18 +301,14 @@ func size(frames [][]byte) int {
 		size += len(frame)
 	}
 	return size
-
 }
 
 func clamp(x, min, max float64) float64 {
 	if x < min {
 		return min
 	}
-
 	if x > max {
 		return max
 	}
-
 	return x
-
 }
